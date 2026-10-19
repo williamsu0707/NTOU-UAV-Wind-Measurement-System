@@ -1,0 +1,413 @@
+
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>UAV Wind Speed and Direction Monitoring System</title>
+
+  <style>
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      padding: 24px;
+      background: #e6faff;
+      font-family: "Microsoft JhengHei", Arial, sans-serif;
+      color: #003366;
+    }
+
+    .dashboard {
+      max-width: 1150px;
+      margin: auto;
+      text-align: center;
+    }
+
+    h1 { font-size: 28px; }
+
+    .readings {
+      font-size: 20px;
+      margin: 15px 0;
+    }
+
+    .readings span { margin: 0 12px; }
+
+    .toolbar { margin: 15px 0; }
+
+    select {
+      padding: 7px;
+      border-radius: 6px;
+    }
+
+    .top-area {
+      position: relative;
+      min-height: 205px;
+      display: flex;
+      justify-content: center;
+      padding-top: 12px;
+    }
+
+    /* Compass display */
+    .compass {
+      width: 168px;
+      height: 168px;
+      border: 5px solid #003366;
+      border-radius: 50%;
+      position: relative;
+      background: #f4fcff;
+    }
+
+    .direction {
+      position: absolute;
+      font-weight: bold;
+    }
+
+    .north {
+      top: 5px;
+      left: 50%;
+      transform: translateX(-50%);
+    }
+
+    .south {
+      bottom: 5px;
+      left: 50%;
+      transform: translateX(-50%);
+    }
+
+    .west {
+      left: 8px;
+      top: 50%;
+      transform: translateY(-50%);
+    }
+
+    .east {
+      right: 8px;
+      top: 50%;
+      transform: translateY(-50%);
+    }
+
+    /* Rotating compass needle */
+    .needle {
+      position: absolute;
+      width: 3px;
+      height: 65px;
+      bottom: 50%;
+      left: calc(50% - 1.5px);
+      background: red;
+      transform-origin: center bottom;
+      transition: transform 0.5s ease;
+    }
+
+    /* JSON data panel */
+    .json-box {
+      position: absolute;
+      top: 10px;
+      right: 0;
+      width: 245px;
+      padding: 14px;
+      text-align: left;
+      background: white;
+      border-radius: 10px;
+      box-shadow: 0 3px 12px #00000015;
+    }
+
+    .json-box h2 { font-size: 16px; }
+
+    .json-box pre {
+      font-size: 14px;
+      white-space: pre-wrap;
+    }
+
+    /* Wind speed chart */
+    .chart-panel {
+      padding: 18px;
+      margin-top: 8px;
+      background: #ffffffb3;
+      border-radius: 12px;
+      text-align: left;
+    }
+
+    #windChart {
+      width: 100%;
+      height: 330px;
+      display: block;
+    }
+
+    @media (max-width: 650px) {
+      .top-area {
+        flex-direction: column;
+        align-items: center;
+        gap: 18px;
+      }
+
+      .json-box {
+        position: static;
+        width: 100%;
+      }
+    }
+  </style>
+</head>
+
+<body>
+<main class="dashboard">
+
+  <h1>🌬️ 風速與風向監測系統</h1>
+
+  <!-- Current wind speed and direction -->
+  <div class="readings">
+    <span>風速：<b id="speed">--</b> m/s</span>
+    <span>風向：<b id="direction">--</b>°</span>
+  </div>
+
+  <!-- Data source selection -->
+  <div class="toolbar">
+    <label for="dataMode">資料模式：</label>
+    <select id="dataMode">
+      <option value="live">即時資料（Raspberry Pi）</option>
+      <option value="demo">模擬預覽</option>
+    </select>
+    <span id="connectionStatus">準備中...</span>
+  </div>
+
+  <section class="top-area">
+
+    <!-- Wind direction compass -->
+    <div class="compass">
+      <span class="direction north">N</span>
+      <span class="direction south">S</span>
+      <span class="direction west">W</span>
+      <span class="direction east">E</span>
+      <div class="needle" id="needle"></div>
+    </div>
+
+    <!-- Latest JSON values -->
+    <aside class="json-box">
+      <h2>最新 JSON 資料</h2>
+      <pre id="json">等待資料...</pre>
+    </aside>
+
+  </section>
+
+  <!-- Real-time wind speed graph -->
+  <section class="chart-panel">
+    <h2>即時風速趨勢</h2>
+    <canvas id="windChart"></canvas>
+    <p>每秒更新一次，顯示最近 30 筆資料。</p>
+  </section>
+
+</main>
+
+<script>
+  // Initialize dashboard variables.
+  const mode = document.getElementById("dataMode");
+  const status = document.getElementById("connectionStatus");
+  const canvas = document.getElementById("windChart");
+  const ctx = canvas.getContext("2d");
+  const history = [];
+
+  let demoSpeed = 3.5;
+  let demoDirection = 210;
+  let busy = false;
+
+  // Use demo mode automatically when opened as a local file.
+  if (location.protocol === "file:") {
+    mode.value = "demo";
+    mode.querySelector('[value="live"]').disabled = true;
+  }
+
+  // Generate simulated sensor readings.
+  function generateDemoData() {
+    demoSpeed = Math.max(
+      0,
+      Math.min(12, demoSpeed + (Math.random() - 0.5) * 1.2)
+    );
+
+    demoDirection =
+      (demoDirection + (Math.random() - 0.5) * 22 + 360) % 360;
+
+    return {
+      spd: Number(demoSpeed.toFixed(2)),
+      dir: Number(demoDirection.toFixed(1))
+    };
+  }
+
+  // Update current readings and compass.
+  function updateDisplay(d) {
+    const speed = Number(d.spd);
+    const direction = Number(d.dir);
+
+    if (!Number.isFinite(speed) ||
+        !Number.isFinite(direction) ||
+        speed < 0) {
+      throw new Error("Invalid sensor data");
+    }
+
+    document.getElementById("speed").textContent =
+      speed.toFixed(2);
+
+    document.getElementById("direction").textContent =
+      direction.toFixed(1);
+
+    document.getElementById("needle").style.transform =
+      `rotate(${direction}deg)`;
+
+    document.getElementById("json").textContent =
+      JSON.stringify(d, null, 2);
+
+    history.push({
+      time: new Date().toLocaleTimeString(),
+      speed: speed
+    });
+
+    // Keep only the latest 30 readings.
+    if (history.length > 30) history.shift();
+
+    drawChart();
+  }
+
+  // Draw the wind speed chart using native Canvas.
+  function drawChart() {
+    const box = canvas.getBoundingClientRect();
+    const ratio = window.devicePixelRatio || 1;
+
+    canvas.width = box.width * ratio;
+    canvas.height = box.height * ratio;
+
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+
+    const w = box.width;
+    const h = box.height;
+    const left = 50;
+    const top = 20;
+    const plotW = w - 70;
+    const plotH = h - 60;
+
+    ctx.clearRect(0, 0, w, h);
+
+    const maxSpeed = Math.max(
+      5,
+      Math.ceil(Math.max(0, ...history.map(p => p.speed)) * 1.2)
+    );
+
+    // Draw horizontal grid lines.
+    for (let i = 0; i <= 5; i++) {
+      const y = top + plotH * i / 5;
+
+      ctx.strokeStyle = "#d9e5ef";
+      ctx.beginPath();
+      ctx.moveTo(left, y);
+      ctx.lineTo(w - 20, y);
+      ctx.stroke();
+
+      ctx.fillStyle = "#587087";
+      ctx.font = "12px Arial";
+      ctx.textAlign = "right";
+      ctx.fillText(
+        (maxSpeed * (5 - i) / 5).toFixed(1),
+        left - 8, y
+      );
+    }
+
+    if (!history.length) return;
+
+    // Convert measurements into chart coordinates.
+    const points = history.map((p, i) => ({
+      x: left + (
+        history.length === 1
+          ? plotW / 2
+          : i * plotW / (history.length - 1)
+      ),
+      y: top + plotH * (1 - p.speed / maxSpeed)
+    }));
+
+    // Draw the wind speed line.
+    ctx.beginPath();
+    points.forEach((p, i) => {
+      if (i === 0) ctx.moveTo(p.x, p.y);
+      else ctx.lineTo(p.x, p.y);
+    });
+
+    ctx.strokeStyle = "#1683ee";
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+
+    // Display the latest chart timestamp.
+    ctx.fillStyle = "#587087";
+    ctx.font = "12px Arial";
+    ctx.textAlign = "right";
+    ctx.fillText(
+      history[history.length - 1].time,
+      w - 20, h - 12
+    );
+  }
+
+  // Read data from Flask or the local simulator.
+  async function refreshData() {
+    if (busy) return;
+    busy = true;
+
+    const requestedMode = mode.value;
+
+    try {
+      let data;
+
+      if (requestedMode === "demo") {
+        data = generateDemoData();
+      } else {
+        const controller = new AbortController();
+        const timeout = setTimeout(
+          () => controller.abort(), 3000
+        );
+
+        try {
+          const response = await fetch("/data", {
+            cache: "no-store",
+            signal: controller.signal
+          });
+
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+
+          data = await response.json();
+        } finally {
+          clearTimeout(timeout);
+        }
+      }
+
+      if (requestedMode === mode.value) {
+        updateDisplay(data);
+        status.textContent =
+          requestedMode === "demo"
+            ? "模擬模式"
+            : "Flask 已連線";
+      }
+
+    } catch (error) {
+      status.textContent =
+        "資料讀取失敗：" + error.message;
+    } finally {
+      busy = false;
+    }
+  }
+
+  // Reset chart history when changing data sources.
+  mode.addEventListener("change", () => {
+    history.length = 0;
+    document.getElementById("speed").textContent = "--";
+    document.getElementById("direction").textContent = "--";
+    document.getElementById("json").textContent = "等待資料...";
+    drawChart();
+    refreshData();
+  });
+
+  // Keep the chart responsive.
+  window.addEventListener("resize", drawChart);
+
+  // Start the dashboard and refresh once per second.
+  drawChart();
+  refreshData();
+  setInterval(refreshData, 1000);
+</script>
+</body>
+</html>
